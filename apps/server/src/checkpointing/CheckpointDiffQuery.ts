@@ -10,6 +10,7 @@ import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { CHECKPOINT_DIFF_MAX_OUTPUT_BYTES } from "../vcs/VcsDriver.ts";
@@ -24,6 +25,7 @@ import {
   type CheckpointServiceError,
 } from "./Errors.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
+import * as ThreadRepoCheckpoints from "./ThreadRepoCheckpoints.ts";
 import { isGitImport, parseTurnDiffFilesFromNumstat, type TurnDiffFileSummary } from "./Diffs.ts";
 
 // Windows limits a command line to 32,767 characters. Leave room for the rest of git's arguments.
@@ -64,6 +66,16 @@ export class CheckpointDiffQuery extends Context.Service<
 
 const isTurnDiffResult = Schema.is(OrchestrationGetTurnDiffResult);
 
+// Streaming decode drops an incomplete final UTF-8 character at the byte boundary.
+const truncateDiff = (diff: string) =>
+  new TextDecoder().decode(
+    Buffer.from(diff).subarray(
+      0,
+      CHECKPOINT_DIFF_MAX_OUTPUT_BYTES - Buffer.byteLength(DIFF_TRUNCATED_MARKER),
+    ),
+    { stream: true },
+  ) + DIFF_TRUNCATED_MARKER;
+
 function buildTurnDiffResult(
   input: {
     readonly threadId: ThreadId;
@@ -85,6 +97,7 @@ export const make = Effect.gen(function* () {
   const threads = yield* ThreadManagement.ThreadManagementService;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const digest = yield* Digest.Digest;
+  const repoCheckpoints = yield* Effect.serviceOption(ThreadRepoCheckpoints.ThreadRepoCheckpoints);
 
   const getTurnDiff: CheckpointDiffQuery["Service"]["getTurnDiff"] = Effect.fn("getTurnDiff")(
     function* (input) {
@@ -238,18 +251,21 @@ export const make = Effect.gen(function* () {
         diff += patch;
         if (patchBytes > remainingBytes) {
           // Reserve marker space only on overflow, which may trim an earlier batch.
-          // Streaming decode drops an incomplete final UTF-8 character at the byte boundary.
-          diff =
-            new TextDecoder().decode(
-              Buffer.from(diff).subarray(
-                0,
-                CHECKPOINT_DIFF_MAX_OUTPUT_BYTES - Buffer.byteLength(DIFF_TRUNCATED_MARKER),
-              ),
-              { stream: true },
-            ) + DIFF_TRUNCATED_MARKER;
+          diff = truncateDiff(diff);
           break;
         }
         remainingBytes -= patchBytes;
+      }
+      if (!diff.endsWith(DIFF_TRUNCATED_MARKER) && Option.isSome(repoCheckpoints)) {
+        const repoPatch = yield* repoCheckpoints.value.diff({
+          threadId: input.threadId,
+          fromOrdinal: input.fromTurnCount,
+          toOrdinal: input.toTurnCount,
+          ignoreWhitespace,
+          maxOutputBytes: remainingBytes + 1,
+        });
+        diff += repoPatch;
+        if (Buffer.byteLength(repoPatch) > remainingBytes) diff = truncateDiff(diff);
       }
 
       const turnDiff = buildTurnDiffResult(input, diff);

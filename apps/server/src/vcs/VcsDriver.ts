@@ -35,6 +35,8 @@ export interface VcsDiffCheckpointsInput {
   readonly maxOutputBytes?: number;
   /** An empty list yields an empty diff. */
   readonly filePaths?: ReadonlyArray<string>;
+  /** Prepended to patch paths, so patches from several repositories stay distinct. */
+  readonly pathPrefix?: string;
 }
 
 export interface VcsListAuthoredPathsInput {
