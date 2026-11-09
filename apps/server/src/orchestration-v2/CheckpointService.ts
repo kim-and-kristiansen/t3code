@@ -17,10 +17,12 @@ import * as Base64Url from "effect/encoding/Base64Url";
 import * as Hex from "effect/encoding/Hex";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { isGitImport, parseTurnDiffFilesFromNumstat } from "../checkpointing/Diffs.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
+import * as ThreadRepoCheckpoints from "../checkpointing/ThreadRepoCheckpoints.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
 const CHECKPOINT_REFS_PREFIX = "refs/t3/orchestration-v2/checkpoints";
@@ -243,6 +245,17 @@ export const layer: Layer.Layer<
     const checkpointRefFor = (input: Parameters<typeof checkpointRefForScopeOrdinal>[0]) =>
       checkpointRefForScopeOrdinal(input).pipe(Effect.provideService(Digest.Digest, crypto));
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    const repoCheckpoints = yield* Effect.serviceOption(
+      ThreadRepoCheckpoints.ThreadRepoCheckpoints,
+    );
+    const withRepoCheckpoints = <A, E>(
+      scope: OrchestrationV2CheckpointScope,
+      effect: (service: ThreadRepoCheckpoints.ThreadRepoCheckpointsShape) => Effect.Effect<A, E>,
+      fallback: A,
+    ): Effect.Effect<A, E> =>
+      Option.isSome(repoCheckpoints) && scope.kind === "root_run"
+        ? effect(repoCheckpoints.value)
+        : Effect.succeed(fallback);
     const workspaceLocks = yield* KeyedLock.make<string>();
     const withWorkspaceLock = <A, E, R>(cwd: string, effect: Effect.Effect<A, E, R>) =>
       workspaceLocks.withLock(cwd, effect);
@@ -571,9 +584,43 @@ export const layer: Layer.Layer<
               }),
           ),
         ),
-      captureBaseline,
+      captureBaseline: (input) =>
+        captureBaseline(input).pipe(
+          Effect.andThen(
+            withRepoCheckpoints(
+              input.scope,
+              (service) =>
+                service.captureBaselines({
+                  threadId: input.scope.threadId,
+                  ordinal: input.ordinalWithinScope,
+                }),
+              undefined,
+            ),
+          ),
+        ),
       materializeBaselineCheckpoint,
-      capture,
+      capture: (input) =>
+        input.forceMissing === true
+          ? capture(input)
+          : capture(input).pipe(
+              Effect.flatMap((checkpoint) =>
+                withRepoCheckpoints(
+                  input.scope,
+                  (service) =>
+                    service.capture({
+                      threadId: input.scope.threadId,
+                      ordinal: input.ordinalWithinScope,
+                    }),
+                  [],
+                ).pipe(
+                  Effect.map((files) =>
+                    files.length === 0
+                      ? checkpoint
+                      : { ...checkpoint, files: [...checkpoint.files, ...files] },
+                  ),
+                ),
+              ),
+            ),
       restore,
       deleteStaleRefs,
     } satisfies CheckpointServiceV2Shape);

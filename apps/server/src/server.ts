@@ -69,6 +69,7 @@ import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRe
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as NativeChildWorkQuery from "./orchestration-v2/NativeChildWorkQuery.ts";
 import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
+import * as ThreadRepoCheckpoints from "./checkpointing/ThreadRepoCheckpoints.ts";
 import * as SourceControlBuiltInDrivers from "./sourceControl/builtInDrivers.ts";
 import * as SourceControlSignIn from "./sourceControl/SourceControlSignIn.ts";
 import { BUILT_IN_SOURCE_CONTROL_DRIVER_LIST } from "./sourceControl/sourceControlDefinitions.ts";
@@ -487,6 +488,11 @@ const layerVcs = Layer.empty.pipe(
 
 const layerCheckpointStore = CheckpointStore.layer.pipe(Layer.provide(layerVcsDriverRegistry));
 
+const layerThreadRepoCheckpoints = ThreadRepoCheckpoints.layer.pipe(
+  Layer.provide(layerCheckpointStore),
+  Layer.provide(layerVcsDriverRegistry),
+);
+
 const layerPortScanner = PortScanner.layer.pipe(Layer.provide(ProcessRunner.layer));
 
 const layerTerminal = TerminalManager.layer.pipe(
@@ -568,6 +574,7 @@ const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
   Layer.provide(layerScheduledTaskWebhookOrigin),
   Layer.provide(ProviderUsageAnalytics.layer),
   Layer.provide(layerCheckpointStore),
+  Layer.provide(layerThreadRepoCheckpoints),
   Layer.provide(layerGitWorkflow),
   Layer.provide(
     RunFinalizationService.layerObserver.pipe(
@@ -581,7 +588,11 @@ const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
 const layerOrchestrationApplication = Layer.merge(
   CheckpointDiffQuery.layer,
   NativeChildWorkQuery.layer,
-).pipe(Layer.provideMerge(layerCheckpointStore), Layer.provideMerge(layerOrchestrationV2Runtime));
+).pipe(
+  Layer.provide(layerThreadRepoCheckpoints),
+  Layer.provideMerge(layerCheckpointStore),
+  Layer.provideMerge(layerOrchestrationV2Runtime),
+);
 
 const layerThreadSettlementWorker = Layer.effectDiscard(
   ThreadSettlementService.make.pipe(Effect.flatMap((service) => service.start())),
@@ -700,6 +711,8 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   ),
   Layer.provideMerge(ProviderRegistry.layer),
   Layer.provideMerge(ProviderInstanceRegistryHydration.layer),
+  // Claude adapters read it optionally to snapshot repositories outside the project.
+  Layer.provideMerge(layerThreadRepoCheckpoints),
   // Provider hydration builds the Claude runner, which reports agents to the same scanner the
   // terminal and preview layers share.
   Layer.provideMerge(layerPortScanner),

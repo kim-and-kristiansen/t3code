@@ -29,6 +29,7 @@ export interface DiffCheckpointsInput {
   readonly maxOutputBytes?: number;
   /** Limits the diff to these exact paths. An empty list yields an empty diff. */
   readonly filePaths?: ReadonlyArray<string>;
+  readonly pathPrefix?: string;
 }
 
 export interface ListAuthoredPathsInput {

@@ -157,6 +157,7 @@ import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import * as ThreadRepoCheckpoints from "../../checkpointing/ThreadRepoCheckpoints.ts";
 import { snapshotMcpApp } from "../../mcpApps/McpAppSnapshot.ts";
 import { resolveClaudeSdkExecutablePath } from "../../provider/Drivers/ClaudeExecutable.ts";
 import {
@@ -1740,6 +1741,15 @@ const CLAUDE_BACKGROUND_WAIT_INSTRUCTIONS = `
 To wait for a background command or Monitor you started (tests, a build), call \`t3_background_wait\` with its task ID before you end your turn. Do not mark work you leave running, or PRs. T3 MCP tools are deferred: load one with ToolSearch before you call it.
 `;
 
+const CLAUDE_FILE_EDIT_TOOL_MATCHER = "Edit|Write|MultiEdit|NotebookEdit";
+
+const claudeEditedFilePath = (toolInput: unknown): string | null => {
+  if (typeof toolInput !== "object" || toolInput === null) return null;
+  const { file_path: filePath, notebook_path: notebookPath } = toolInput as Record<string, unknown>;
+  const candidate = filePath ?? notebookPath;
+  return typeof candidate === "string" && candidate.length > 0 ? candidate : null;
+};
+
 // Native subagents start from their task, not this session's system prompt.
 const subagentDeviceInstructions: HookCallback = () =>
   Promise.resolve({
@@ -1770,6 +1780,7 @@ export function makeClaudeQueryOptions(input: {
   readonly disallowedTools?: ReadonlyArray<string>;
   readonly permissionMode?: PermissionMode;
   readonly canUseTool?: CanUseTool;
+  readonly beforeFileEdit?: HookCallback;
   readonly onUserDialog?: ClaudeQueryOptions["onUserDialog"];
   readonly onElicitation?: ClaudeQueryOptions["onElicitation"];
   readonly supportedDialogKinds?: ClaudeQueryOptions["supportedDialogKinds"];
@@ -1897,8 +1908,21 @@ export function makeClaudeQueryOptions(input: {
         ...launchAppendSystemPrompt,
       ].join("\n\n"),
     },
-    ...(deviceInstructions
-      ? { hooks: { SubagentStart: [{ hooks: [subagentDeviceInstructions] }] } }
+    ...(deviceInstructions || input.beforeFileEdit !== undefined
+      ? {
+          hooks: {
+            ...(deviceInstructions
+              ? { SubagentStart: [{ hooks: [subagentDeviceInstructions] }] }
+              : {}),
+            ...(input.beforeFileEdit === undefined
+              ? {}
+              : {
+                  PreToolUse: [
+                    { matcher: CLAUDE_FILE_EDIT_TOOL_MATCHER, hooks: [input.beforeFileEdit] },
+                  ],
+                }),
+          },
+        }
       : {}),
     ...(Object.keys(extraArgs).length === 0 ? {} : { extraArgs }),
   };
@@ -4868,6 +4892,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+  const repoCheckpoints = yield* Effect.serviceOption(ThreadRepoCheckpoints.ThreadRepoCheckpoints);
   const { attachmentsDir, fileSystem, path, random, idAllocator, queryRunner } = adapterOptions;
   const loadModelCatalog = (
     adapterOptions.modelCatalog ?? Effect.succeed(BUNDLED_CLAUDE_MODEL_CATALOG)
@@ -10567,6 +10592,34 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const canUseTool: CanUseTool = (toolName, toolInput, callbackOptions) =>
           runPromise(canUseToolEffect(toolName, toolInput, callbackOptions));
 
+        // Snapshots a repository outside the project before Claude's first edit there, so its diff has a baseline.
+        const beforeFileEdit: HookCallback | undefined = Option.isNone(repoCheckpoints)
+          ? undefined
+          : (hookInput) =>
+              runPromise(
+                Effect.gen(function* () {
+                  const context = yield* Ref.get(activeTurn);
+                  const filePath =
+                    hookInput.hook_event_name === "PreToolUse"
+                      ? claudeEditedFilePath(hookInput.tool_input)
+                      : null;
+                  if (
+                    context === null ||
+                    filePath === null ||
+                    context.input.appThread.lineage.sideChat === true
+                  ) {
+                    return {};
+                  }
+                  yield* repoCheckpoints.value.track({
+                    threadId: context.input.threadId,
+                    rootCwd: context.input.runtimePolicy.cwd ?? hookInput.cwd,
+                    runOrdinal: context.input.runOrdinal,
+                    filePath,
+                  });
+                  return {};
+                }),
+              );
+
         const onElicitationEffect = Effect.fn("ClaudeAdapterV2.onElicitation")(function* (
           request: ElicitationRequest,
           callbackOptions: Parameters<NonNullable<ClaudeQueryOptions["onElicitation"]>>[1],
@@ -10977,6 +11030,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   allowDangerouslySkipPermissions: queryPolicy.allowDangerouslySkipPermissions,
                 }),
             canUseTool,
+            ...(beforeFileEdit === undefined ? {} : { beforeFileEdit }),
             onUserDialog,
             onElicitation,
             supportedDialogKinds: ["resume_return"],
