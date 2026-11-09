@@ -661,7 +661,9 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "language",
     title: msg("Language"),
     to: "/settings/general",
-    searchTerms: ["locale translation english español spanish chinese 中文 idioma 语言"],
+    searchTerms: [
+      "locale translation english español spanish chinese 中文 russian русский idioma 语言 язык",
+    ],
   },
   {
     id: "time-format",
