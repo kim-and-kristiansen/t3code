@@ -9,6 +9,7 @@ const NATIVE_LANGUAGE_NAMES: Readonly<Record<string, string>> = {
   en: "English",
   es: "Español",
   zh: "中文（简体）",
+  ko: "한국어",
 };
 
 export function nativeLanguageName(locale: string): string {
