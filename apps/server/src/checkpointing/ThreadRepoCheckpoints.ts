@@ -1,4 +1,8 @@
-import { CheckpointRef, type OrchestrationV2CheckpointFileSummary, type ThreadId } from "@t3tools/contracts";
+import {
+  CheckpointRef,
+  type OrchestrationV2CheckpointFileSummary,
+  type ThreadId,
+} from "@t3tools/contracts";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
@@ -21,6 +25,7 @@ const REPO_REFS_PREFIX = "refs/t3/orchestration-v2/repos";
 
 const Registry = Schema.Struct({ repos: Schema.Array(Schema.String) });
 const decodeRegistry = Schema.decodeUnknownEffect(Schema.fromJsonString(Registry));
+const encodeRegistry = Schema.encodeEffect(Schema.fromJsonString(Registry));
 
 export interface ThreadRepoCheckpointsShape {
   /** Starts tracking the repository containing `filePath`, snapshotting it before the edit lands. */
@@ -52,6 +57,7 @@ export class ThreadRepoCheckpoints extends Context.Service<
   ThreadRepoCheckpointsShape
 >()("t3/checkpointing/ThreadRepoCheckpoints") {}
 
+/** @public */
 export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
@@ -97,10 +103,8 @@ export const make = Effect.gen(function* () {
     repos: ReadonlyArray<string>,
   ) {
     const filePath = yield* registryPath(threadId);
-    yield* writeFileStringAtomically({
-      filePath,
-      contents: `${JSON.stringify({ repos })}\n`,
-    }).pipe(
+    const contents = yield* encodeRegistry({ repos });
+    yield* writeFileStringAtomically({ filePath, contents: `${contents}\n` }).pipe(
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(Path.Path, path),
       Effect.provideService(HostProcess.Platform, platform),
@@ -138,14 +142,14 @@ export const make = Effect.gen(function* () {
   // Extra repositories are best effort; they must never fail the project's own checkpoint.
   const orWarn = <A, E, R>(
     effect: Effect.Effect<A, E, R>,
-    fallback: NoInfer<A>,
+    fallback: () => A,
     message: string,
     annotations: Record<string, unknown>,
   ) =>
     effect.pipe(
       Effect.catch((cause) =>
         Effect.logWarning(message, { ...annotations, cause: String(cause) }).pipe(
-          Effect.as(fallback),
+          Effect.map(fallback),
         ),
       ),
     );
@@ -169,7 +173,7 @@ export const make = Effect.gen(function* () {
       );
     },
     (effect, input) =>
-      orWarn(effect, undefined, "thread repo checkpoint tracking failed", {
+      orWarn(effect, () => undefined, "thread repo checkpoint tracking failed", {
         threadId: input.threadId,
         filePath: input.filePath,
       }),
@@ -184,7 +188,7 @@ export const make = Effect.gen(function* () {
       (repoRoot) =>
         orWarn(
           captureIfMissing(input.threadId, repoRoot, input.ordinal),
-          undefined,
+          () => undefined,
           "thread repo baseline capture failed",
           { threadId: input.threadId, repoRoot },
         ),
@@ -200,7 +204,12 @@ export const make = Effect.gen(function* () {
     const toCheckpointRef = yield* refFor(threadId, repoRoot, ordinal);
     const fromCheckpointRef = yield* refFor(threadId, repoRoot, Math.max(0, ordinal - 1));
     yield* checkpointStore.captureCheckpoint({ cwd: repoRoot, checkpointRef: toCheckpointRef });
-    if (!(yield* checkpointStore.hasCheckpointRef({ cwd: repoRoot, checkpointRef: fromCheckpointRef }))) {
+    if (
+      !(yield* checkpointStore.hasCheckpointRef({
+        cwd: repoRoot,
+        checkpointRef: fromCheckpointRef,
+      }))
+    ) {
       return [];
     }
     const refs = { cwd: repoRoot, fromCheckpointRef, toCheckpointRef };
@@ -227,7 +236,7 @@ export const make = Effect.gen(function* () {
         (repoRoot) =>
           orWarn(
             captureRepo(input.threadId, repoRoot, input.ordinal),
-            [],
+            () => [],
             "thread repo checkpoint capture failed",
             { threadId: input.threadId, repoRoot },
           ),
@@ -243,7 +252,9 @@ export const make = Effect.gen(function* () {
     maxOutputBytes: number,
   ) {
     const toCheckpointRef = yield* refFor(input.threadId, repoRoot, input.toOrdinal);
-    if (!(yield* checkpointStore.hasCheckpointRef({ cwd: repoRoot, checkpointRef: toCheckpointRef }))) {
+    if (
+      !(yield* checkpointStore.hasCheckpointRef({ cwd: repoRoot, checkpointRef: toCheckpointRef }))
+    ) {
       return "";
     }
     // A repository first touched mid-thread has no refs before its first baseline.
@@ -294,7 +305,7 @@ export const make = Effect.gen(function* () {
         if (remaining <= 0) break;
         combined += yield* orWarn(
           diffRepo(input, repoRoot, remaining),
-          "",
+          () => "",
           "thread repo checkpoint diff failed",
           { threadId: input.threadId, repoRoot },
         );

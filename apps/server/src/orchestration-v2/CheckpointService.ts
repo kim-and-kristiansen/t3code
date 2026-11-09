@@ -600,11 +600,11 @@ export const layer: Layer.Layer<
         ),
       materializeBaselineCheckpoint,
       capture: (input) =>
-        capture(input).pipe(
-          Effect.flatMap((checkpoint) =>
-            input.forceMissing === true
-              ? Effect.succeed(checkpoint)
-              : withRepoCheckpoints(
+        input.forceMissing === true
+          ? capture(input)
+          : capture(input).pipe(
+              Effect.flatMap((checkpoint) =>
+                withRepoCheckpoints(
                   input.scope,
                   (service) =>
                     service.capture({
@@ -619,8 +619,8 @@ export const layer: Layer.Layer<
                       : { ...checkpoint, files: [...checkpoint.files, ...files] },
                   ),
                 ),
-          ),
-        ),
+              ),
+            ),
       restore,
       deleteStaleRefs,
     } satisfies CheckpointServiceV2Shape);
